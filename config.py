@@ -11,6 +11,10 @@ BASE_URL = 'https://tickethouse.net'
 # This is used as the API Token: Authorization: Token <USER_ID>
 USER_ID = 'f98fdf9f-3c5c-4854-86e7-fe495fcccee1'  # fabionew4512@gmail.com (Reseller)
 
+# Superadmin credentials — used by event_delete.py (web session auth)
+SUPERADMIN_EMAIL    = 'testforpermisgoo@gmail.com'
+SUPERADMIN_PASSWORD = 'Sh97436410@'
+
 # ─── Travel Connection API ──────────────────────────────────────────────────
 TC_API_URL = 'https://api.travelconnectionleisure.com/v1'
 TC_USERNAME = 'contact@go2events.live'
