@@ -172,15 +172,30 @@ def get_section_id_from_admin(event_id: str, section_name: str) -> int | None:
 def get_section_id(event_id: str, section_name: str) -> int | None:
     """
     Get the section ID for a given event and section name.
-    
+
     Tries three methods in order:
-    1. Event's ticket list (fast, works if tickets exist)
-    2. Superadmin event update page (slower, works for any event)
-    3. Returns None if both fail
+    1. Sections API endpoint — fast, always works for any event
+    2. Event's ticket list — fallback if sections endpoint fails
+    3. Superadmin event update page — last resort
     """
     headers = {'Authorization': f'Token {USER_ID}'}
 
-    # Method 1: Get section ID from existing tickets
+    # Method 1: Sections API endpoint (primary — works even with 0 tickets)
+    try:
+        r = requests.get(
+            f'{BASE_URL}/api/events/{event_id}/sections/',
+            headers=headers,
+            timeout=20
+        )
+        if r.status_code == 200:
+            data = r.json()
+            for section in data.get('sections', []):
+                if section.get('name', '').lower() == section_name.lower():
+                    return section['id']
+    except Exception as e:
+        print(f'  Method 1 (sections API) error: {e}')
+
+    # Method 2: Get section ID from existing tickets
     try:
         r = requests.get(
             f'{BASE_URL}/api/events/{event_id}/tickets/',
@@ -194,16 +209,16 @@ def get_section_id(event_id: str, section_name: str) -> int | None:
                 if sec.get('name', '').lower() == section_name.lower():
                     return sec['id']
     except Exception as e:
-        print(f'  Method 1 (tickets) error: {e}')
+        print(f'  Method 2 (tickets) error: {e}')
 
-    # Method 2: Get section ID from superadmin event update page
-    print(f"  Section '{section_name}' not in tickets — trying admin page...")
+    # Method 3: Get section ID from superadmin event update page
+    print(f"  Section '{section_name}' not in sections/tickets — trying admin page...")
     try:
         section_id = get_section_id_from_admin(event_id, section_name)
         if section_id:
             return section_id
     except Exception as e:
-        print(f'  Method 2 (admin) error: {e}')
+        print(f'  Method 3 (admin) error: {e}')
 
     print(f"  Could not find section ID for '{section_name}' in event {event_id}.")
     return None
