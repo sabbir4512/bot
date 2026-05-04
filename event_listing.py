@@ -14,8 +14,13 @@ import requests
 import json
 import time
 import traceback
+from datetime import datetime, date
 
-from config import BASE_URL, USER_ID
+from config import BASE_URL, SUPERADMIN_USER_ID
+
+# Default placeholder images used when event_scraper.py did not find images
+DEFAULT_STADIUM_IMAGE = 'https://tickethouse.net/static/events/img/default_stadium.jpg'
+DEFAULT_EVENT_LOGO    = 'https://tickethouse.net/static/events/img/default_logo.png'
 
 STATUS_FILE = 'status.txt'
 
@@ -78,14 +83,14 @@ TEAM_SECTIONS = {
 # ─── API helpers ─────────────────────────────────────────────────────────────
 def get_existing_events() -> set:
     """Return a set of (event_name, event_date) already on the website."""
-    headers = {'Authorization': f'Token {USER_ID}'}
+    headers = {'Authorization': f'Token {SUPERADMIN_USER_ID}'}
     existing = set()
     page = 1
     while True:
         resp = requests.get(
             f'{BASE_URL}/api/events/all/',
             headers=headers,
-            params={'page': page, 'per_page': 100},
+            params={'page': page, 'per_page': 100, 'sort': 'all'},
             timeout=20
         )
         if resp.status_code != 200:
@@ -105,15 +110,15 @@ def create_event(event_name: str, event_date: str, event_time: str,
                  stadium_name: str, stadium_image: str, event_logo: str,
                  sections: list) -> str | None:
     """Create a new event on tickethouse.net. Returns the new event_id or None."""
-    headers = {'Authorization': f'Token {USER_ID}', 'Content-Type': 'application/json'}
+    headers = {'Authorization': f'Token {SUPERADMIN_USER_ID}', 'Content-Type': 'application/json'}
     payload = {
         'name':          event_name,
         'category':      'sports',
         'date':          event_date,
-        'time':          event_time or '00:00:00',
+        'time':          event_time or '15:00:00',
         'stadium_name':  stadium_name or 'TBD',
-        'stadium_image': stadium_image or '',
-        'event_logo':    event_logo or '',
+        'stadium_image': stadium_image or DEFAULT_STADIUM_IMAGE,
+        'event_logo':    event_logo or DEFAULT_EVENT_LOGO,
         'sections':      sections,
     }
     resp = requests.post(
@@ -163,9 +168,20 @@ if __name__ == '__main__':
     created = 0
     skipped = 0
 
+    today = date.today()
+
     for ev in events_from_db:
         event_name = ev['event_name']
         event_date = ev['event_date']
+
+        # Skip past events — the API rejects them
+        try:
+            ev_date = datetime.strptime(event_date, '%Y-%m-%d').date()
+            if ev_date < today:
+                skipped += 1
+                continue
+        except (ValueError, TypeError):
+            pass
 
         if (event_name, event_date) in existing:
             skipped += 1
