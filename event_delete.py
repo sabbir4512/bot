@@ -49,7 +49,9 @@ def get_all_events(expired_only: bool = False) -> list:
     page = 1
 
     while True:
-        url = f'{BASE_URL}/api/events/all/?page={page}'
+        # Use sort=all to get ALL events including past/expired ones
+        # Default sort='upcoming' only returns future events
+        url = f'{BASE_URL}/api/events/all/?page={page}&sort=all&per_page=100'
         try:
             r = requests.get(url, headers=HEADERS, timeout=30)
             r.raise_for_status()
