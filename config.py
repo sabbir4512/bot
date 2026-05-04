@@ -11,7 +11,9 @@ BASE_URL = 'https://tickethouse.net'
 # This is used as the API Token: Authorization: Token <USER_ID>
 USER_ID = 'f98fdf9f-3c5c-4854-86e7-fe495fcccee1'  # fabionew4512@gmail.com (Reseller)
 
-# Superadmin credentials — used by event_delete.py (web session auth)
+# Superadmin account — used by event_delete.py for API token auth
+# UUID is used as the API Token: Authorization: Token <SUPERADMIN_USER_ID>
+SUPERADMIN_USER_ID  = '23cfa33d-c781-405a-8805-f0d8523617e1'  # testforpermisgoo@gmail.com
 SUPERADMIN_EMAIL    = 'testforpermisgoo@gmail.com'
 SUPERADMIN_PASSWORD = 'Sh97436410@'
 

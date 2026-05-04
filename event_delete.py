@@ -1,227 +1,207 @@
 """
 event_delete.py — Tickethouse.net Bot
 ========================================
-Deletes ALL events (and their associated ticket listings) via the superadmin
-web interface. Uses Django session-based authentication — no API token needed.
+Deletes ALL events (and their associated ticket listings) via the
+superadmin API endpoint. Uses Token-based authentication with the
+superadmin account UUID.
 
-Credentials used: testforpermisgoo@gmail.com (superadmin account)
+The delete cascades automatically:
+    Event → EventSection → Ticket → TicketReservation (all deleted)
 
 Usage:
     python3 event_delete.py              # Delete all events (with confirmation)
     python3 event_delete.py --dry-run    # Preview what would be deleted
     python3 event_delete.py --expired    # Delete only expired (past) events
+    python3 event_delete.py --force      # Skip confirmation prompt
 
-WARNING: Deleting an event also deletes ALL its ticket listings permanently.
+WARNING: Deleting an event also permanently deletes ALL its ticket listings.
 """
 
 import requests
 import time
 import sys
-import re
 import traceback
-from bs4 import BeautifulSoup
 
-from config import BASE_URL, SUPERADMIN_EMAIL, SUPERADMIN_PASSWORD
+try:
+    from config import BASE_URL, SUPERADMIN_USER_ID
+except ImportError:
+    BASE_URL           = 'https://tickethouse.net'
+    SUPERADMIN_USER_ID = '23cfa33d-c781-405a-8805-f0d8523617e1'
 
-DRY_RUN   = '--dry-run'  in sys.argv
-EXPIRED   = '--expired'  in sys.argv
+DRY_RUN = '--dry-run' in sys.argv
+EXPIRED = '--expired' in sys.argv
+FORCE   = '--force'   in sys.argv
 
-
-# ─── Session auth ─────────────────────────────────────────────────────────────
-
-def get_superadmin_session() -> requests.Session:
-    """Log in to the Django admin and return an authenticated session."""
-    session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0'})
-
-    # Get CSRF token from admin login page
-    r = session.get(f'{BASE_URL}/admin/login/?next=/admin/', timeout=20)
-    soup = BeautifulSoup(r.text, 'html.parser')
-    csrf_input = soup.find('input', {'name': 'csrfmiddlewaretoken'})
-    if not csrf_input:
-        raise RuntimeError('Could not find CSRF token on admin login page')
-    csrf = csrf_input['value']
-
-    # Login
-    resp = session.post(
-        f'{BASE_URL}/admin/login/?next=/admin/',
-        data={
-            'csrfmiddlewaretoken': csrf,
-            'username': SUPERADMIN_EMAIL,
-            'password': SUPERADMIN_PASSWORD,
-            'next': '/admin/',
-        },
-        headers={'Referer': f'{BASE_URL}/admin/login/?next=/admin/'},
-        timeout=20,
-        allow_redirects=True,
-    )
-    if '/admin/' not in resp.url and 'login' in resp.url:
-        raise RuntimeError(f'Admin login failed — redirected to: {resp.url}')
-    print(f'  Superadmin session established (logged in as {SUPERADMIN_EMAIL})')
-    return session
+HEADERS = {
+    'Authorization': f'Token {SUPERADMIN_USER_ID}',
+    'Content-Type':  'application/json',
+}
 
 
-# ─── Event discovery ──────────────────────────────────────────────────────────
+# ─── Fetch all events ─────────────────────────────────────────────────────────
 
-def get_all_event_delete_urls(session: requests.Session, expired_only: bool = False) -> list:
+def get_all_events(expired_only: bool = False) -> list:
     """
-    Scrape the superadmin events list (and expired events list) to collect
-    all event delete URLs.  Returns a list of dicts:
-        {'name': str, 'date': str, 'delete_url': str}
+    Fetch all events from the API.
+    Returns a list of dicts: {event_id, name, date, is_expired}
     """
-    results = []
-    endpoints = []
+    all_events = []
+    page = 1
 
-    if expired_only:
-        endpoints = [f'{BASE_URL}/superadmin/expired-events/']
+    while True:
+        url = f'{BASE_URL}/api/events/all/?page={page}'
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            print(f'  Warning: Could not fetch page {page}: {e}')
+            break
+
+        data = r.json()
+
+        # The API returns {'events': [...], 'page': N, 'total_pages': N}
+        events = data.get('events', data.get('results', []))
+        total_pages = data.get('total_pages', 1)
+
+        for event in events:
+            event_id   = str(event.get('event_id', ''))
+            name       = event.get('name', f'Event-{event_id}')
+            date       = event.get('date', '')
+            is_expired = event.get('is_expired', False)
+
+            if expired_only and not is_expired:
+                continue
+
+            all_events.append({
+                'event_id':   event_id,
+                'name':       name,
+                'date':       date,
+                'is_expired': is_expired,
+            })
+
+        if page >= total_pages:
+            break
+        page += 1
+
+    return all_events
+
+
+# ─── Delete ───────────────────────────────────────────────────────────────────
+
+def delete_event(event: dict) -> tuple:
+    """
+    Delete an event via the API.
+    Returns (success: bool, message: str)
+    """
+    event_id = event['event_id']
+    url = f'{BASE_URL}/api/events/delete/{event_id}/'
+
+    try:
+        r = requests.post(url, headers=HEADERS, timeout=30)
+    except requests.exceptions.Timeout:
+        return False, 'Timeout'
+    except requests.RequestException as e:
+        return False, str(e)
+
+    if r.status_code == 200:
+        data = r.json()
+        if data.get('success'):
+            return True, data.get('message', 'Deleted')
+        else:
+            return False, data.get('error', data.get('message', 'Unknown error'))
+
+    elif r.status_code == 404:
+        return True, 'Already deleted (404)'
+
+    elif r.status_code == 403:
+        return False, f'403 Forbidden — check superadmin UUID in config.py'
+
     else:
-        endpoints = [
-            f'{BASE_URL}/superadmin/events/',
-            f'{BASE_URL}/superadmin/expired-events/',
-        ]
-
-    for base_endpoint in endpoints:
-        page = 1
-        while True:
-            url = f'{base_endpoint}?page={page}&per_page=100'
-            r = session.get(url, timeout=20)
-            if r.status_code != 200:
-                print(f'  Warning: {url} returned {r.status_code}')
-                break
-            soup = BeautifulSoup(r.text, 'html.parser')
-
-            # Collect delete form actions
-            delete_forms = soup.find_all('form', action=re.compile(r'/superadmin/events/.+/delete/'))
-            if not delete_forms:
-                break
-
-            for form in delete_forms:
-                action = form.get('action', '')
-                # Try to find event name nearby
-                card = form.find_parent(class_=re.compile(r'event|card|row', re.I))
-                name = ''
-                date = ''
-                if card:
-                    name_tag = card.find(class_=re.compile(r'event.?name|title|name', re.I))
-                    date_tag = card.find(class_=re.compile(r'date|time', re.I))
-                    if name_tag:
-                        name = name_tag.get_text(strip=True)
-                    if date_tag:
-                        date = date_tag.get_text(strip=True)
-
-                # Deduplicate
-                if not any(e['delete_url'] == action for e in results):
-                    results.append({'name': name, 'date': date, 'delete_url': action})
-
-            # Check for next page
-            next_link = soup.find('a', href=re.compile(rf'page={page + 1}'))
-            if not next_link:
-                break
-            page += 1
-
-        print(f'  Collected {len(results)} events from {base_endpoint}')
-
-    return results
-
-
-def delete_event(session: requests.Session, delete_url: str) -> bool:
-    """
-    POST to the superadmin delete URL to delete an event.
-    Returns True on success.
-    """
-    full_url = f'{BASE_URL}{delete_url}' if delete_url.startswith('/') else delete_url
-
-    # Need a fresh CSRF token from the events list page
-    r_csrf = session.get(f'{BASE_URL}/superadmin/events/', timeout=20)
-    soup = BeautifulSoup(r_csrf.text, 'html.parser')
-    csrf_input = soup.find('input', {'name': 'csrfmiddlewaretoken'})
-    csrf = csrf_input['value'] if csrf_input else ''
-
-    resp = session.post(
-        full_url,
-        data={'csrfmiddlewaretoken': csrf},
-        headers={'Referer': f'{BASE_URL}/superadmin/events/'},
-        timeout=20,
-        allow_redirects=True,
-    )
-    # Success = redirected to events list
-    if resp.status_code in (200, 302) and 'superadmin/events' in resp.url:
-        return True
-    # Also accept 200 with success message in body
-    if resp.status_code == 200 and ('deleted successfully' in resp.text.lower() or
-                                     'superadmin/events' in resp.url):
-        return True
-    print(f'  Unexpected response: {resp.status_code} — {resp.url}')
-    return False
+        try:
+            msg = r.json().get('error', r.text[:100])
+        except Exception:
+            msg = r.text[:100]
+        return False, f'HTTP {r.status_code}: {msg}'
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print('=== Event Delete Bot Starting ===')
+    print('=' * 60)
+    print('  Tickethouse.net — Event Delete Bot')
+    print('=' * 60)
+
     if DRY_RUN:
         print('*** DRY RUN MODE — no events will actually be deleted ***\n')
     if EXPIRED:
         print('*** EXPIRED ONLY MODE — only past events will be deleted ***\n')
 
-    print('Establishing superadmin session...')
+    # ── Fetch events ──
+    print('\nFetching events from API...')
     try:
-        session = get_superadmin_session()
+        events = get_all_events(expired_only=EXPIRED)
     except Exception as e:
-        print(f'ERROR: Could not log in — {e}')
+        print(f'\nERROR: Could not fetch events — {e}')
+        traceback.print_exc()
         sys.exit(1)
 
-    print('Fetching event list...')
-    events = get_all_event_delete_urls(session, expired_only=EXPIRED)
     total = len(events)
-    print(f'\nFound {total} event(s) to delete.\n')
 
     if total == 0:
-        print('Nothing to delete. Exiting.')
+        print('\nNo events found. Nothing to delete.')
         sys.exit(0)
 
-    # Print summary
-    print(f"{'#':<4} {'Name':<45} {'Date':<12}")
-    print('-' * 65)
+    # ── Summary table ──
+    print(f'\n{"#":<5} {"Event Name":<50} {"Date":<12} {"Expired":<8}')
+    print('-' * 80)
     for i, e in enumerate(events, 1):
-        name = (e['name'] or '(unknown)')[:44]
-        date = (e['date'] or '')[:11]
-        print(f"  {i:<3} {name:<45} {date:<12}")
+        name    = (e['name'] or '(unknown)')[:49]
+        date    = (e['date'] or '')[:11]
+        expired = 'Yes' if e['is_expired'] else 'No'
+        print(f'  {i:<4} {name:<50} {date:<12} {expired}')
+
+    print(f'\nTotal: {total} event(s) found.')
 
     if DRY_RUN:
-        print(f'\nDry run complete. {total} event(s) would be deleted.')
+        print('\nDry run complete. No events were deleted.')
         sys.exit(0)
 
-    # Safety confirmation
-    print(f'\n⚠  WARNING: This will permanently delete {total} event(s) and ALL their ticket listings!')
-    confirm = input('Type "yes" to confirm: ').strip().lower()
-    if confirm != 'yes':
-        print('Aborted.')
-        sys.exit(0)
+    # ── Confirmation ──
+    if not FORCE:
+        print(f'\n⚠  WARNING: This will permanently delete {total} event(s)')
+        print('   and ALL their ticket listings!')
+        confirm = input('\nType "yes" to confirm deletion: ').strip().lower()
+        if confirm != 'yes':
+            print('Aborted.')
+            sys.exit(0)
 
+    # ── Delete loop ──
     print(f'\nDeleting {total} event(s)...\n')
     deleted = 0
     failed  = 0
 
     for i, e in enumerate(events, 1):
-        name       = e['name'] or '(unknown)'
-        date       = e['date'] or ''
-        delete_url = e['delete_url']
+        name  = e['name'] or '(unknown)'
+        label = name[:55]
 
-        print(f'  [{i}/{total}] Deleting: {name} ({date})')
+        print(f'  [{i}/{total}] {label}')
+        success, msg = delete_event(e)
 
-        try:
-            success = delete_event(session, delete_url)
-            if success:
-                deleted += 1
-                print(f'    ✓ Deleted')
-            else:
-                failed += 1
-                print(f'    ✗ Failed')
-        except Exception:
-            traceback.print_exc()
+        if success:
+            deleted += 1
+            print(f'    ✓ {msg}')
+        else:
             failed += 1
+            print(f'    ✗ {msg}')
 
-        time.sleep(0.8)  # Be polite to the server
+        # Small delay to be polite to the server
+        time.sleep(0.3)
 
-    print(f'\n=== Done. Deleted: {deleted}, Failed: {failed} ===')
+    # ── Summary ──
+    print('\n' + '=' * 60)
+    print(f'  Done! Deleted: {deleted} | Failed: {failed} | Total: {total}')
+    print('=' * 60)
+
+    if failed > 0:
+        print(f'\n{failed} event(s) failed to delete.')
+        sys.exit(1)
