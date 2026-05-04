@@ -19,6 +19,7 @@ import json
 from config import (
     TC_API_URL, TC_USERNAME, TC_PASSWORD, TC_TOKEN_FILE, HOME_TEAMS
 )
+from event_delete import auto_cleanup_expired_events
 
 # ─── Status file ────────────────────────────────────────────────────────────
 STATUS_FILE = 'status.txt'
@@ -251,8 +252,9 @@ if __name__ == '__main__':
 
             delete_olds(cursor, conn, current_time)
             conn.close()
-
             print(f'Database updated: {saved} ticket entries saved.')
+            # Auto-delete any expired events from tickethouse.net
+            auto_cleanup_expired_events()
             update_status('break')
             print('Taking a break (5 minutes)...\n')
             time.sleep(300)

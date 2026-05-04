@@ -8,11 +8,15 @@ superadmin account UUID.
 The delete cascades automatically:
     Event → EventSection → Ticket → TicketReservation (all deleted)
 
-Usage:
+Usage (manual):
     python3 event_delete.py              # Delete all events (with confirmation)
     python3 event_delete.py --dry-run    # Preview what would be deleted
     python3 event_delete.py --expired    # Delete only expired (past) events
     python3 event_delete.py --force      # Skip confirmation prompt
+
+Auto-cleanup (called from scraper.py loop):
+    from event_delete import auto_cleanup_expired_events
+    auto_cleanup_expired_events()        # Silently deletes all expired events
 
 WARNING: Deleting an event also permanently deletes ALL its ticket listings.
 """
@@ -126,7 +130,42 @@ def delete_event(event: dict) -> tuple:
         return False, f'HTTP {r.status_code}: {msg}'
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Auto-cleanup (called from the main scraper loop) ────────────────────────
+
+def auto_cleanup_expired_events() -> int:
+    """
+    Silently fetch all expired events and delete them.
+    Designed to be called from the scraper.py main loop each cycle.
+
+    Returns the number of events deleted.
+    """
+    try:
+        expired_events = get_all_events(expired_only=True)
+    except Exception as e:
+        print(f'  [auto-cleanup] Could not fetch expired events: {e}')
+        return 0
+
+    if not expired_events:
+        return 0
+
+    print(f'  [auto-cleanup] Found {len(expired_events)} expired event(s) — deleting...')
+    deleted = 0
+    for event in expired_events:
+        name = (event.get('name') or '(unknown)')[:60]
+        date = event.get('date', '')
+        success, msg = delete_event(event)
+        if success:
+            deleted += 1
+            print(f'    ✓ Deleted: {name} ({date})')
+        else:
+            print(f'    ✗ Failed:  {name} ({date}) — {msg}')
+        time.sleep(0.3)
+
+    print(f'  [auto-cleanup] Done — {deleted}/{len(expired_events)} expired event(s) deleted.')
+    return deleted
+
+
+# ─── Main (manual use) ────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     print('=' * 60)
