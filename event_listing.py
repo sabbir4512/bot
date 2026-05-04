@@ -4,7 +4,11 @@ event_listing.py — Tickethouse.net Bot
 Reads event metadata from event_data.db (populated by event_scraper.py)
 and creates new events on tickethouse.net for any that don't yet exist.
 
-Each event is created with the standard sections for that team.
+Each event is created with:
+  - Correct stadium name and SVG key for the home team
+  - Category: 'football' (shows under Football tab)
+  - Service charges: 5% normal users, 3% resellers
+  - Sections defined per home team
 
 Run once (or on a schedule): python3 event_listing.py
 """
@@ -22,10 +26,32 @@ from config import BASE_URL, SUPERADMIN_USER_ID
 DEFAULT_STADIUM_IMAGE = 'https://tickethouse.net/static/events/img/default_stadium.jpg'
 DEFAULT_EVENT_LOGO    = 'https://tickethouse.net/static/events/img/default_logo.png'
 
-STATUS_FILE = 'status.txt'
+# Service charges (percentage)
+NORMAL_SERVICE_CHARGE   = 5   # 5% for normal users
+RESELLER_SERVICE_CHARGE = 3   # 3% for resellers
+
+# ─── Team → Stadium mapping ───────────────────────────────────────────────────
+# Keys must match the STADIUM_SVG_CHOICES in events/models.py exactly
+TEAM_STADIUM = {
+    'Arsenal':           {'name': 'Emirates Stadium',           'svg_key': 'emiratesStadium'},
+    'Aston Villa':       {'name': 'Villa Park Stadium',         'svg_key': 'villaParkStadium'},
+    'Manchester United': {'name': 'Old Trafford',               'svg_key': 'oldTraffordStadium'},
+    'Liverpool':         {'name': 'Anfield Stadium',            'svg_key': 'anfieldStadium'},
+    'Leeds United':      {'name': 'Elland Road',                'svg_key': 'ellandStadium'},
+    'Tottenham Hotspur': {'name': 'Tottenham Hotspur Stadium',  'svg_key': 'tottenhamHotspurStadium'},
+    'Chelsea':           {'name': 'Stamford Bridge',            'svg_key': 'stamfordBridge'},
+    'Manchester City':   {'name': 'Etihad Stadium',             'svg_key': 'etihadStadium'},
+    'Fulham':            {'name': 'Craven Cottage',             'svg_key': 'cravenCottage'},
+    'Crystal Palace':    {'name': 'Selhurst Park',              'svg_key': 'selhurstPark'},
+    'Brentford':         {'name': 'Gtech Community Stadium',    'svg_key': 'gtechCommunityStadium'},
+    'Atletico Madrid':   {'name': 'Riyadh Metropolitano Stadium', 'svg_key': 'riyadhMetropolitanoStadium'},
+    'Sevilla FC':        {'name': 'Estadio Ramon Sanchez Pizjuan', 'svg_key': None},
+    'Real Sociedad':     {'name': 'Reale Arena',                'svg_key': None},
+    'Nottingham Forest': {'name': 'City Ground',                'svg_key': None},
+    'AFC Bournemouth':   {'name': 'Vitality Stadium',           'svg_key': None},
+}
 
 # ─── Sections per team ────────────────────────────────────────────────────────
-# Each entry: {'name': str, 'color': str}
 TEAM_SECTIONS = {
     'Arsenal': [
         {'name': 'VIP Club Level',  'color': '#FF0000'},
@@ -73,9 +99,9 @@ TEAM_SECTIONS = {
         {'name': 'VIP Hospitality', 'color': '#CB3524'},
     ],
     'Sevilla FC': [
-        {'name': 'VIP Hospitality',       'color': '#D4001A'},
+        {'name': 'VIP Hospitality',          'color': '#D4001A'},
         {'name': 'Lateral Tribuna Alto N43', 'color': '#D4001A'},
-        {'name': 'Gol Tribuna Alto N46',  'color': '#D4001A'},
+        {'name': 'Gol Tribuna Alto N46',     'color': '#D4001A'},
     ],
 }
 
@@ -107,19 +133,23 @@ def get_existing_events() -> set:
 
 
 def create_event(event_name: str, event_date: str, event_time: str,
-                 stadium_name: str, stadium_image: str, event_logo: str,
+                 stadium_name: str, stadium_svg_key: str | None,
+                 stadium_image: str, event_logo: str,
                  sections: list) -> str | None:
     """Create a new event on tickethouse.net. Returns the new event_id or None."""
     headers = {'Authorization': f'Token {SUPERADMIN_USER_ID}', 'Content-Type': 'application/json'}
     payload = {
-        'name':          event_name,
-        'category':      'sports',
-        'date':          event_date,
-        'time':          event_time or '15:00:00',
-        'stadium_name':  stadium_name or 'TBD',
-        'stadium_image': stadium_image or DEFAULT_STADIUM_IMAGE,
-        'event_logo':    event_logo or DEFAULT_EVENT_LOGO,
-        'sections':      sections,
+        'name':                    event_name,
+        'category':                'football',
+        'date':                    event_date,
+        'time':                    event_time or '15:00:00',
+        'stadium_name':            stadium_name or 'TBD',
+        'stadium_svg_key':         stadium_svg_key,
+        'stadium_image':           stadium_image or DEFAULT_STADIUM_IMAGE,
+        'event_logo':              event_logo or DEFAULT_EVENT_LOGO,
+        'sections':                sections,
+        'normal_service_charge':   NORMAL_SERVICE_CHARGE,
+        'reseller_service_charge': RESELLER_SERVICE_CHARGE,
     }
     resp = requests.post(
         f'{BASE_URL}/api/events/create/',
@@ -189,17 +219,27 @@ if __name__ == '__main__':
 
         # Determine home team from event name
         home_team = event_name.split(' v ')[0].strip()
+
+        # Get sections for this home team
         sections = TEAM_SECTIONS.get(home_team)
         if not sections:
             print(f'  No sections defined for team: {home_team} — skipping.')
             skipped += 1
             continue
 
+        # Get stadium info for this home team
+        stadium_info = TEAM_STADIUM.get(home_team, {})
+        # Use scraped stadium_name if available, otherwise use mapped name
+        stadium_name = ev['stadium_name'] if ev['stadium_name'] and ev['stadium_name'] != 'TBD' \
+                       else stadium_info.get('name', 'TBD')
+        stadium_svg_key = stadium_info.get('svg_key')
+
         event_id = create_event(
             event_name=event_name,
             event_date=event_date,
             event_time=ev['event_time'],
-            stadium_name=ev['stadium_name'],
+            stadium_name=stadium_name,
+            stadium_svg_key=stadium_svg_key,
             stadium_image=ev['stadium_image'],
             event_logo=ev['event_logo'],
             sections=sections,
